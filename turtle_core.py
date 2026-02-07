@@ -3,6 +3,7 @@
 包含数据获取、指标计算、信号判断、仓位计算等核心逻辑
 """
 
+import os
 import akshare as ak
 import pandas as pd
 from datetime import datetime
@@ -12,66 +13,114 @@ from turtle_config import (
     VOLUME_MA_PERIOD,
     VOLUME_RATIO_THRESHOLD,
     ETF_PREFIXES,
+    BYPASS_PROXY,
 )
+
+# 绕过系统代理，避免代理软件未运行时请求失败
+if BYPASS_PROXY:
+    for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY',
+                'all_proxy', 'ALL_PROXY']:
+        os.environ.pop(key, None)
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
+
+
+def _exchange_prefix(code):
+    """根据代码判断交易所前缀 (sh/sz)"""
+    if code.startswith('6'):
+        return 'sh'
+    elif code.startswith(('0', '3')):
+        return 'sz'
+    # ETF: 51/52/56/58/59 -> 上海, 15/16 -> 深圳
+    if code[:2] in ('51', '52', '56', '58', '59'):
+        return 'sh'
+    return 'sz'
 
 
 def get_stock_data(code, start_date, end_date):
     """
     获取股票或 ETF 数据，自动识别类型并调用对应接口
+    优先使用网易/新浪接口，东方财富接口作为备选
     返回统一格式的 DataFrame
     """
     df = None
     is_etf = any(code.startswith(p) for p in ETF_PREFIXES)
+    prefix = _exchange_prefix(code)
 
     try:
         if is_etf:
-            df = ak.fund_etf_hist_em(
-                symbol=code,
-                period="daily",
+            # 优先: 新浪 ETF 接口
+            df = ak.fund_etf_hist_sina(symbol=f"{prefix}{code}")
+            if df is not None and not df.empty:
+                df = df.rename(columns={
+                    'date': 'Date', 'open': 'Open', 'close': 'Close',
+                    'high': 'High', 'low': 'Low', 'volume': 'Volume'
+                })
+                # 新浪接口返回全量数据，按日期过滤
+                df['Date'] = pd.to_datetime(df['Date'])
+                df = df[(df['Date'] >= start_date) & (df['Date'] <= end_date)]
+                df['Date'] = df['Date'].dt.strftime('%Y-%m-%d')
+                df = df.reset_index(drop=True)
+        else:
+            # 优先: 网易股票接口 (前复权)
+            df = ak.stock_zh_a_daily(
+                symbol=f"{prefix}{code}",
                 start_date=start_date,
                 end_date=end_date,
                 adjust="qfq"
             )
             if df is not None and not df.empty:
                 df = df.rename(columns={
-                    '日期': 'Date', '开盘': 'Open', '收盘': 'Close',
-                    '最高': 'High', '最低': 'Low', '成交量': 'Volume'
+                    'date': 'Date', 'open': 'Open', 'close': 'Close',
+                    'high': 'High', 'low': 'Low', 'volume': 'Volume'
                 })
-        else:
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start_date, end_date=end_date,
-                adjust="qfq"
-            )
+    except Exception as e:
+        print(f"  [备用接口] 主接口失败 ({e})，尝试东方财富接口...")
+        # 备选: 东方财富接口
+        try:
+            if is_etf:
+                df = ak.fund_etf_hist_em(
+                    symbol=code, period="daily",
+                    start_date=start_date, end_date=end_date,
+                    adjust="qfq"
+                )
+            else:
+                df = ak.stock_zh_a_hist(
+                    symbol=code, period="daily",
+                    start_date=start_date, end_date=end_date,
+                    adjust="qfq"
+                )
             if df is not None and not df.empty:
                 df = df.rename(columns={
                     '日期': 'Date', '开盘': 'Open', '收盘': 'Close',
                     '最高': 'High', '最低': 'Low', '成交量': 'Volume'
                 })
-    except Exception as e:
-        print(f"  [错误] 数据获取失败: {e}")
-        return None
+        except Exception as e2:
+            print(f"  [错误] 数据获取失败: {e2}")
+            return None
 
     return df
 
 
 def get_stock_name(code):
     """
-    获取股票或 ETF 名称
+    获取股票或 ETF 名称，通过新浪实时行情接口
     """
-    is_etf = any(code.startswith(p) for p in ETF_PREFIXES)
+    import requests
 
+    prefix = _exchange_prefix(code)
     try:
-        if is_etf:
-            etf_list = ak.fund_etf_spot_em()
-            match = etf_list[etf_list['代码'] == code]
-            if not match.empty:
-                return match.iloc[0]['名称']
-        else:
-            stock_list = ak.stock_zh_a_spot_em()
-            match = stock_list[stock_list['代码'] == code]
-            if not match.empty:
-                return match.iloc[0]['名称']
+        r = requests.get(
+            f"https://hq.sinajs.cn/list={prefix}{code}",
+            headers={"Referer": "https://finance.sina.com.cn/"},
+            timeout=5,
+        )
+        # 格式: var hq_str_sz002371="北方华创,..."
+        text = r.text
+        if '="' in text:
+            name = text.split('="')[1].split(',')[0]
+            if name:
+                return name
     except Exception:
         pass
 
