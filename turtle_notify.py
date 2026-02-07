@@ -67,7 +67,7 @@ def build_card(results, date_str):
 
     elements.append({"tag": "hr"})
 
-    # 盈亏排名
+    # 盈亏排名 + 止盈止损
     if valid_results:
         sorted_results = sorted(valid_results, key=lambda x: x["profit_pct"], reverse=True)
         ranking_lines = []
@@ -77,7 +77,8 @@ def build_card(results, date_str):
                 f"{icon} {r['name']}({r['code']})  "
                 f"**{r['profit_pct']:+.2f}%**  "
                 f"{r['profit_loss']:+,.0f}元  "
-                f"收盘:{r['price']:.3f}"
+                f"收盘:{r['price']:.3f}\n"
+                f"     止损:{r['stop_loss']:.3f}({r['stop_loss_pct']:+.1f}%) {r['stop_type']}"
             )
         elements.append({
             "tag": "div",

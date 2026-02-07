@@ -291,10 +291,18 @@ def compute_stop_loss(price, n_val, cost=0, last_add_price=0, high_20=0, held_sh
         # 计算盈亏
         profit_pct = (price - cost) / cost
 
-        # 盈利超过 10% 时，启用移动止损
-        if profit_pct > 0.1:
-            stop_loss = max(base_stop, trailing_stop, cost)  # 至少保本
-            stop_type = "移动止损"
+        # 分级止盈止损
+        if profit_pct > 0.3:
+            profit_lock = cost + 0.7 * (price - cost)
+            stop_loss = max(base_stop, trailing_stop, profit_lock)
+            stop_type = "止盈保护(锁定70%)"
+        elif profit_pct > 0.2:
+            profit_lock = cost + 0.5 * (price - cost)
+            stop_loss = max(base_stop, trailing_stop, profit_lock)
+            stop_type = "止盈保护(锁定50%)"
+        elif profit_pct > 0.1:
+            stop_loss = max(base_stop, trailing_stop, cost)
+            stop_type = "移动止损(保本)"
         else:
             stop_loss = base_stop
             stop_type = f"固定止损({base_type})"

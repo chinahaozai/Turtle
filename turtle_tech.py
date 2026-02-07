@@ -181,6 +181,8 @@ def analyze_stock(stock_info, capital, risk_ratio):
         "volume_ratio": volume_ratio,
         "unit_shares": unit_shares,
         "stop_loss": stop_loss,
+        "stop_type": stop_type,
+        "stop_loss_pct": stop_loss_pct,
     }
 
 
