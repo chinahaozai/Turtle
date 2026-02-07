@@ -1,0 +1,26 @@
+name: 海龟交易每日监控
+
+on:
+  schedule:
+    # UTC 07:30 = 北京时间 15:30，仅工作日
+    - cron: '30 7 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 执行监控并发送通知
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: python turtle_notify.py
