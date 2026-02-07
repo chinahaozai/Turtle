@@ -91,6 +91,7 @@ def analyze_stock(stock_info, capital, risk_ratio):
     stop_loss = stop_info['stop_loss']
     stop_loss_pct = stop_info['stop_loss_pct']
     stop_type = stop_info['stop_type']
+    base_stop = stop_info['base_stop']
 
     # 计算盈亏
     if cost > 0 and held_shares > 0:
@@ -183,6 +184,7 @@ def analyze_stock(stock_info, capital, risk_ratio):
         "stop_loss": stop_loss,
         "stop_type": stop_type,
         "stop_loss_pct": stop_loss_pct,
+        "base_stop": base_stop,
     }
 
 

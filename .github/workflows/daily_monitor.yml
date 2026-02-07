@@ -23,4 +23,7 @@ jobs:
       - name: 执行监控并发送通知
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_SPREADSHEET: ${{ secrets.FEISHU_SPREADSHEET }}
         run: python turtle_notify.py

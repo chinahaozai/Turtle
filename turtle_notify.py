@@ -1,7 +1,13 @@
 """
 海龟交易系统 - 飞书通知脚本
 通过飞书 Webhook 推送每日持仓分析结果（Interactive Card 格式）
-用法: FEISHU_WEBHOOK=<url> python turtle_notify.py
+支持从飞书电子表格读取持仓数据
+
+环境变量:
+  FEISHU_WEBHOOK         - 飞书机器人 Webhook URL（必填）
+  FEISHU_APP_ID          - 飞书应用 App ID（可选，用于读取表格）
+  FEISHU_APP_SECRET      - 飞书应用 App Secret（可选）
+  FEISHU_SPREADSHEET     - 飞书表格 token（可选，从表格 URL 中获取）
 """
 
 import os
@@ -10,8 +16,95 @@ import requests
 from datetime import datetime
 
 from turtle_config import TOTAL_CAPITAL, RISK_RATIO
-from turtle_tech import HOLDINGS, analyze_stock
+from turtle_tech import HOLDINGS as DEFAULT_HOLDINGS, analyze_stock
 
+
+# ================= 飞书表格读取 =================
+
+def _get_tenant_token(app_id, app_secret):
+    """获取飞书 tenant_access_token"""
+    resp = requests.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"获取飞书 token 失败: {data}")
+    return data["tenant_access_token"]
+
+
+def _get_first_sheet_id(token, spreadsheet_token):
+    """获取电子表格第一个工作表的 sheet_id"""
+    resp = requests.get(
+        f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    sheets = data.get("data", {}).get("sheets", [])
+    if not sheets:
+        raise RuntimeError("表格中没有工作表")
+    return sheets[0]["sheet_id"]
+
+
+def _read_sheet_values(token, spreadsheet_token, sheet_id):
+    """读取工作表全部数据"""
+    range_str = f"{sheet_id}!A:E"
+    resp = requests.get(
+        f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("data", {}).get("valueRange", {}).get("values", [])
+
+
+def fetch_holdings_from_feishu():
+    """
+    从飞书电子表格读取持仓数据
+    表格列: A=代码, B=名称, C=成本价, D=持仓数量, E=最后加仓价(可选)
+    第一行为表头，自动跳过
+    """
+    app_id = os.environ.get("FEISHU_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    spreadsheet_token = os.environ.get("FEISHU_SPREADSHEET", "")
+
+    if not all([app_id, app_secret, spreadsheet_token]):
+        return None
+
+    print("正在从飞书表格读取持仓数据...")
+    token = _get_tenant_token(app_id, app_secret)
+    sheet_id = _get_first_sheet_id(token, spreadsheet_token)
+    rows = _read_sheet_values(token, spreadsheet_token, sheet_id)
+
+    if len(rows) < 2:
+        print("  [警告] 表格数据不足，使用默认持仓")
+        return None
+
+    holdings = []
+    for row in rows[1:]:  # 跳过表头
+        if not row or not row[0]:
+            continue
+        code = str(row[0]).strip()
+        name = str(row[1]).strip() if len(row) > 1 and row[1] else code
+        cost = float(row[2]) if len(row) > 2 and row[2] else 0
+        shares = int(float(row[3])) if len(row) > 3 and row[3] else 0
+        last_add_price = float(row[4]) if len(row) > 4 and row[4] else 0
+
+        entry = {"code": code, "name": name, "cost": cost, "shares": shares}
+        if last_add_price > 0:
+            entry["last_add_price"] = last_add_price
+        holdings.append(entry)
+
+    print(f"  读取到 {len(holdings)} 只持仓")
+    return holdings
+
+
+# ================= 飞书卡片构建 =================
 
 def build_card(results, date_str):
     """将分析结果构建为飞书消息卡片"""
@@ -73,13 +166,17 @@ def build_card(results, date_str):
         ranking_lines = []
         for i, r in enumerate(sorted_results, 1):
             icon = "🟢" if r["profit_pct"] >= 0 else "🔴"
-            ranking_lines.append(
+            line = (
                 f"{icon} {r['name']}({r['code']})  "
                 f"**{r['profit_pct']:+.2f}%**  "
                 f"{r['profit_loss']:+,.0f}元  "
                 f"收盘:{r['price']:.3f}\n"
                 f"     止损:{r['stop_loss']:.3f}({r['stop_loss_pct']:+.1f}%) {r['stop_type']}"
             )
+            # 当实际止损与基准止损不同时，附加基准参考
+            if abs(r["base_stop"] - r["stop_loss"]) > 0.001:
+                line += f"  |  基准(价-2N):{r['base_stop']:.3f}"
+            ranking_lines.append(line)
         elements.append({
             "tag": "div",
             "text": {
@@ -192,14 +289,20 @@ def main():
         print("[错误] 未设置环境变量 FEISHU_WEBHOOK")
         raise SystemExit(1)
 
+    # 优先从飞书表格读取，失败则用默认持仓
+    holdings = fetch_holdings_from_feishu()
+    if holdings is None:
+        print("使用代码中的默认持仓配置")
+        holdings = DEFAULT_HOLDINGS
+
     date_str = datetime.now().strftime("%Y-%m-%d")
     print(f"海龟交易监控 - 飞书通知 ({date_str})")
-    print(f"持仓数量: {len(HOLDINGS)}")
+    print(f"持仓数量: {len(holdings)}")
     print()
 
     # 分析所有持仓
     results = []
-    for stock in HOLDINGS:
+    for stock in holdings:
         result = analyze_stock(stock, TOTAL_CAPITAL, RISK_RATIO)
         results.append(result)
 

@@ -318,6 +318,7 @@ def compute_stop_loss(price, n_val, cost=0, last_add_price=0, high_20=0, held_sh
         "stop_loss": stop_loss,
         "stop_loss_pct": stop_loss_pct,
         "stop_type": stop_type,
+        "base_stop": base_stop if (cost > 0 and held_shares > 0) else stop_loss,
     }
 
 
