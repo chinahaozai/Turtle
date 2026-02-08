@@ -52,15 +52,31 @@ def _get_first_sheet_id(token, spreadsheet_token):
 
 def _read_sheet_values(token, spreadsheet_token, sheet_id):
     """读取工作表全部数据"""
-    range_str = f"{sheet_id}!A:E"
     resp = requests.get(
-        f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}",
+        f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{sheet_id}",
         headers={"Authorization": f"Bearer {token}"},
         timeout=10,
     )
     resp.raise_for_status()
     data = resp.json()
     return data.get("data", {}).get("valueRange", {}).get("values", [])
+
+
+def _resolve_wiki_token(token, wiki_token):
+    """如果是知识库链接，解析出实际的电子表格 token"""
+    resp = requests.get(
+        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token={wiki_token}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        return None
+    node = data.get("data", {}).get("node", {})
+    if node.get("obj_type") == "sheet":
+        return node["obj_token"]
+    return None
 
 
 def fetch_holdings_from_feishu():
@@ -78,6 +94,13 @@ def fetch_holdings_from_feishu():
 
     print("正在从飞书表格读取持仓数据...")
     token = _get_tenant_token(app_id, app_secret)
+
+    # 尝试解析知识库 token 为实际表格 token
+    resolved = _resolve_wiki_token(token, spreadsheet_token)
+    if resolved:
+        print(f"  已从知识库解析表格 token")
+        spreadsheet_token = resolved
+
     sheet_id = _get_first_sheet_id(token, spreadsheet_token)
     rows = _read_sheet_values(token, spreadsheet_token, sheet_id)
 
