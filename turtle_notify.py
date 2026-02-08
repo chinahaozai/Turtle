@@ -35,8 +35,8 @@ def _get_tenant_token(app_id, app_secret):
     return data["tenant_access_token"]
 
 
-def _get_first_sheet_id(token, spreadsheet_token):
-    """获取电子表格第一个工作表的 sheet_id"""
+def _get_all_sheets(token, spreadsheet_token):
+    """获取电子表格所有工作表的 sheet_id 和 title"""
     resp = requests.get(
         f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query",
         headers={"Authorization": f"Bearer {token}"},
@@ -47,7 +47,8 @@ def _get_first_sheet_id(token, spreadsheet_token):
     sheets = data.get("data", {}).get("sheets", [])
     if not sheets:
         raise RuntimeError("表格中没有工作表")
-    return sheets[0]["sheet_id"]
+    return [{"sheet_id": s["sheet_id"], "title": s.get("title", f"Sheet{i+1}")}
+            for i, s in enumerate(sheets)]
 
 
 def _read_sheet_values(token, spreadsheet_token, sheet_id):
@@ -64,26 +65,75 @@ def _read_sheet_values(token, spreadsheet_token, sheet_id):
 
 def _resolve_wiki_token(token, wiki_token):
     """如果是知识库链接，解析出实际的电子表格 token"""
-    resp = requests.get(
-        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token={wiki_token}",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != 0:
+    try:
+        resp = requests.get(
+            f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token={wiki_token}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            print(f"  [警告] 知识库 token 解析失败 (code={data.get('code')}): {data.get('msg', '')}")
+            return None
+        node = data.get("data", {}).get("node", {})
+        if node.get("obj_type") == "sheet":
+            return node["obj_token"]
+        print(f"  [警告] 知识库节点类型不是表格: {node.get('obj_type', '未知')}")
         return None
-    node = data.get("data", {}).get("node", {})
-    if node.get("obj_type") == "sheet":
-        return node["obj_token"]
-    return None
+    except Exception as e:
+        print(f"  [警告] 知识库 token 解析异常: {e}，将尝试作为表格 token 直接使用")
+        return None
+
+
+def _parse_holdings_from_rows(rows, sheet_title):
+    """从工作表行数据解析持仓列表，包含数据校验"""
+    if len(rows) < 2:
+        return []
+
+    holdings = []
+    for idx, row in enumerate(rows[1:], start=2):  # 跳过表头，行号从2开始
+        if not row or not row[0]:
+            continue
+
+        code = str(row[0]).strip()
+
+        # 校验代码格式
+        if not code.isdigit() or len(code) != 6:
+            print(f"  [警告] {sheet_title} 第{idx}行: 代码 '{code}' 格式无效（需6位数字），已跳过")
+            continue
+
+        name = str(row[1]).strip() if len(row) > 1 and row[1] else code
+
+        try:
+            cost = float(row[2]) if len(row) > 2 and row[2] else 0
+            shares = int(float(row[3])) if len(row) > 3 and row[3] else 0
+            last_add_price = float(row[4]) if len(row) > 4 and row[4] else 0
+        except (ValueError, TypeError) as e:
+            print(f"  [警告] {sheet_title} 第{idx}行: {name}({code}) 数值解析失败 ({e})，已跳过")
+            continue
+
+        # 校验数值合理性
+        if cost < 0 or shares < 0:
+            print(f"  [警告] {sheet_title} 第{idx}行: {name}({code}) 成本或持仓为负数，已跳过")
+            continue
+
+        entry = {"code": code, "name": name, "cost": cost, "shares": shares}
+        if last_add_price > 0:
+            entry["last_add_price"] = last_add_price
+        holdings.append(entry)
+
+    return holdings
 
 
 def fetch_holdings_from_feishu():
     """
-    从飞书电子表格读取持仓数据
+    从飞书电子表格读取持仓数据（支持多账户）
+    每个工作表视为一个账户，工作表名称作为账户名
     表格列: A=代码, B=名称, C=成本价, D=持仓数量, E=最后加仓价(可选)
     第一行为表头，自动跳过
+
+    返回: [{"name": "账户名", "holdings": [...]}, ...] 或 None
     """
     app_id = os.environ.get("FEISHU_APP_ID", "")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
@@ -101,35 +151,32 @@ def fetch_holdings_from_feishu():
         print(f"  已从知识库解析表格 token")
         spreadsheet_token = resolved
 
-    sheet_id = _get_first_sheet_id(token, spreadsheet_token)
-    rows = _read_sheet_values(token, spreadsheet_token, sheet_id)
+    sheets = _get_all_sheets(token, spreadsheet_token)
+    print(f"  发现 {len(sheets)} 个工作表")
 
-    if len(rows) < 2:
-        print("  [警告] 表格数据不足，使用默认持仓")
+    accounts = []
+    for sheet in sheets:
+        sheet_id = sheet["sheet_id"]
+        title = sheet["title"]
+        rows = _read_sheet_values(token, spreadsheet_token, sheet_id)
+        holdings = _parse_holdings_from_rows(rows, title)
+
+        if holdings:
+            print(f"  [{title}] 读取到 {len(holdings)} 只持仓")
+            accounts.append({"name": title, "holdings": holdings})
+        else:
+            print(f"  [{title}] 无有效持仓数据，已跳过")
+
+    if not accounts:
+        print("  [警告] 所有工作表均无有效数据，使用默认持仓")
         return None
 
-    holdings = []
-    for row in rows[1:]:  # 跳过表头
-        if not row or not row[0]:
-            continue
-        code = str(row[0]).strip()
-        name = str(row[1]).strip() if len(row) > 1 and row[1] else code
-        cost = float(row[2]) if len(row) > 2 and row[2] else 0
-        shares = int(float(row[3])) if len(row) > 3 and row[3] else 0
-        last_add_price = float(row[4]) if len(row) > 4 and row[4] else 0
-
-        entry = {"code": code, "name": name, "cost": cost, "shares": shares}
-        if last_add_price > 0:
-            entry["last_add_price"] = last_add_price
-        holdings.append(entry)
-
-    print(f"  读取到 {len(holdings)} 只持仓")
-    return holdings
+    return accounts
 
 
 # ================= 飞书卡片构建 =================
 
-def build_card(results, date_str):
+def build_card(results, date_str, account_name=None):
     """将分析结果构建为飞书消息卡片"""
 
     # 汇总数据
@@ -162,7 +209,8 @@ def build_card(results, date_str):
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
 
     # 标题
-    header_title = f"{pnl_emoji} 海龟监控日报 | {date_str} | 总盈亏 {total_pnl:+,.0f} 元 ({pnl_pct:+.2f}%)"
+    account_label = f"{account_name} | " if account_name else ""
+    header_title = f"{pnl_emoji} {account_label}海龟监控日报 | {date_str} | 总盈亏 {total_pnl:+,.0f} 元 ({pnl_pct:+.2f}%)"
     header_color = "green" if total_pnl >= 0 else "red"
 
     elements = []
@@ -312,28 +360,32 @@ def main():
         print("[错误] 未设置环境变量 FEISHU_WEBHOOK")
         raise SystemExit(1)
 
-    # 优先从飞书表格读取，失败则用默认持仓
-    holdings = fetch_holdings_from_feishu()
-    if holdings is None:
-        print("使用代码中的默认持仓配置")
-        holdings = DEFAULT_HOLDINGS
-
     date_str = datetime.now().strftime("%Y-%m-%d")
     print(f"海龟交易监控 - 飞书通知 ({date_str})")
-    print(f"持仓数量: {len(holdings)}")
-    print()
 
-    # 分析所有持仓
-    results = []
-    for stock in holdings:
-        result = analyze_stock(stock, TOTAL_CAPITAL, RISK_RATIO)
-        results.append(result)
+    # 优先从飞书表格读取（多账户），失败则用默认持仓
+    accounts = fetch_holdings_from_feishu()
+    if accounts is None:
+        print("使用代码中的默认持仓配置")
+        accounts = [{"name": None, "holdings": DEFAULT_HOLDINGS}]
 
-    # 构建卡片并发送
-    card = build_card(results, date_str)
-    print("\n正在发送飞书通知...")
-    send_feishu(webhook_url, card)
-    print("发送成功!")
+    for account in accounts:
+        account_name = account["name"]
+        holdings = account["holdings"]
+        label = account_name or "默认账户"
+        print(f"\n--- [{label}] 持仓数量: {len(holdings)} ---")
+
+        # 分析所有持仓
+        results = []
+        for stock in holdings:
+            result = analyze_stock(stock, TOTAL_CAPITAL, RISK_RATIO)
+            results.append(result)
+
+        # 构建卡片并发送
+        card = build_card(results, date_str, account_name)
+        print(f"\n正在发送飞书通知 [{label}]...")
+        send_feishu(webhook_url, card)
+        print(f"[{label}] 发送成功!")
 
 
 if __name__ == "__main__":

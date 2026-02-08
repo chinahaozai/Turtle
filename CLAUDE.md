@@ -109,6 +109,14 @@ python turtle_scout.py
 pip install akshare pandas
 ```
 
+## 命令执行规范
+
+- **高输出命令**：执行可能产生大量输出的命令时（如运行脚本、`pip install`、`git log` 等），应将输出重定向到临时文件，再用 `Read` 工具按需读取，避免撑爆上下文导致 "Request too large" 错误
+  ```bash
+  python turtle_tech.py > /tmp/output.txt 2>&1
+  ```
+  然后使用 Read 工具读取 `/tmp/output.txt` 的关键部分
+
 ## 重要提示
 
 - **数据质量**：AkShare 免费但可能有延迟或缺失，重要交易请以券商数据为准
