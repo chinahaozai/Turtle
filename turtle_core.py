@@ -353,6 +353,13 @@ def fetch_latest_data(code, min_days=70):
 
     df = calculate_indicators(df)
     latest = df.iloc[-1]
+
+    # 校验最新数据日期
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    latest_date = str(latest['Date'])[:10]
+    if latest_date != today_str:
+        print(f"  [注意] 最新数据日期为 {latest_date}，非今日({today_str})，数据源可能有延迟")
+
     name = get_stock_name(code)
 
     return df, latest, name

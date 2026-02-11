@@ -2,8 +2,8 @@ name: 海龟交易每日监控
 
 on:
   schedule:
-    # UTC 07:30 = 北京时间 15:30，仅工作日
-    - cron: '30 7 * * 1-5'
+    # UTC 09:00 = 北京时间 17:00，仅工作日（留足时间等数据源更新）
+    - cron: '0 9 * * 1-5'
   workflow_dispatch:
 
 jobs:
